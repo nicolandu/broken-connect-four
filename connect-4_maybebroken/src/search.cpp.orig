@@ -1,0 +1,265 @@
+#include <algorithm>
+
+#include "display.h"
+#include "tt.h"
+
+#include "search.h"
+
+
+// Used for checking moves from center outward.
+// Files D, C, E, B, F, A, G
+constexpr Bitboard move_order[7] = {FileD_BB, FileC_BB, FileE_BB, FileB_BB, FileF_BB, FileA_BB, FileG_BB};
+
+
+// See https://en.wikipedia.org/wiki/Alpha-beta_pruning#Pseudocode for info, -> fail-soft
+
+
+
+int alpha_beta_red(Hash current_hash, Bitboard red_bb, Bitboard yellow_bb, int depth, int alpha, int beta)
+{
+    if (check_win(yellow_bb)) // yellow played last, check if they won
+    {
+        // if yellow won, it's bad for red (max) : return a negative value, 1 less
+        // than depth left to distinguish from a draw
+        return -(depth + 1);
+    }
+
+    // max recursion reached, consider it a draw (maybe add a heuristic in the future)
+    if (depth == 0) return 0;
+
+    Bitboard moves = generate_moves(red_bb|yellow_bb); // use both bitboards to determine empty cells
+    
+    if (!moves) return 0; // draw if no moves left
+
+    // check for a refutation move
+    bool found;
+    TTEntry* tt_entry = tt.probe(current_hash, found);
+
+    Bitboard tentative_move_only, tentative_move;
+    Hash move_hash;
+
+    int value = -INT_MAX; // max player
+
+    if (found)
+    {
+        tentative_move_only = tt_entry->move;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        move_hash = current_hash ^ red_hashes[get_bb_square(tentative_move_only)];
+        
+        tentative_move = (tentative_move_only | red_bb); // set other bits from our current BB
+
+        // recurse, considering the move we just made and our current opening_book setting
+        // first move evaluated, no need for std::max here
+        value = alpha_beta_yellow(move_hash, tentative_move, yellow_bb, depth-1, alpha, beta);
+        alpha = std::max(alpha, value);
+
+        if (value >= beta) // beta cut-off
+        {
+            return value; // no need to put the entry into the TT again
+        }
+    }
+    
+    while (moves != Empty_BB)
+    {
+        // isolate least significant set bit
+        tentative_move_only = moves & -moves;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        move_hash = current_hash ^ red_hashes[get_bb_square(tentative_move_only)];
+
+        tentative_move = (tentative_move_only | red_bb); // set other bits from our current BB
+
+        // recurse, considering the move we just made and our current opening_book setting
+        value = std::max(value, alpha_beta_yellow(move_hash, tentative_move, yellow_bb, depth-1, alpha, beta));
+
+        alpha = std::max(alpha, value);
+
+        if (value >= beta) // beta cut-off
+        {
+            /*
+            std::cout << "Tentative : \n";
+            display_bitboard_2player_hlred(red_bb, yellow_bb, tentative_move_only);
+            std::cout << "\nAt hash " << std::hex << current_hash << std::dec << '\n';
+            */
+
+           
+            // save current move using current hash
+            tt.save(current_hash, tentative_move_only);
+            break;
+        }
+
+    } 
+    
+    return value;
+}
+
+
+int alpha_beta_yellow(Hash current_hash, Bitboard red_bb, Bitboard yellow_bb, int depth, int alpha, int beta)
+{
+    if (check_win(red_bb)) // red played last, check if they won
+    {
+        // if red won, it's bad for yellow (min) : return a positive value, 1 more
+        // than depth left to distinguish from a draw
+        return (depth + 1);
+    }
+
+    // max recursion reached, consider it a draw (maybe add a heuristic in the future)
+    if (depth == 0) return 0;
+
+    Bitboard moves = generate_moves(red_bb|yellow_bb); // use both bitboards to determine empty cells
+    
+    if (!moves) return 0; // draw if no moves left
+
+    // check for a refutation move
+    bool found;
+    TTEntry* tt_entry = tt.probe(current_hash, found);
+
+    Bitboard tentative_move_only, tentative_move;
+    Hash move_hash;
+
+    int value = INT_MAX; // min player
+    
+    if (found)
+    {
+        tentative_move_only = tt_entry->move;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        move_hash = current_hash ^ yellow_hashes[get_bb_square(tentative_move_only)];
+        
+        tentative_move = (tentative_move_only | yellow_bb); // set other bits from our current BB
+
+        // recurse, considering the move we just made and our current opening_book setting
+        // first move evaluated, no need for std::min here
+        value = alpha_beta_red(move_hash, red_bb, tentative_move, depth-1, alpha, beta);
+        beta = std::min(beta, value);
+
+        if (value <= alpha) // alpha cut-off
+        {
+            return value; // no need to put the entry into the TT again
+        }
+    }
+
+    while (moves != Empty_BB)
+    {
+        // isolate least significant set bit
+        tentative_move_only = moves & -moves;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        move_hash = current_hash ^ yellow_hashes[get_bb_square(tentative_move_only)];
+
+        Bitboard tentative_move = (tentative_move_only | yellow_bb); // set other bits from our current BB
+
+        // recurse, considering the move we just made and our current opening_book setting
+        value = std::min(value, alpha_beta_red(move_hash, red_bb, tentative_move, depth-1, alpha, beta));
+
+        beta = std::min(beta, value);
+
+        if (value <= alpha) // alpha cut-off
+        {
+            // save current move using current hash
+            tt.save(current_hash, tentative_move_only);
+            break;
+        } 
+
+    }
+    
+    return value;
+}
+
+Bitboard root_search_red(Bitboard red_bb, Bitboard yellow_bb, int depth)
+{
+    // invalid parameter
+    if (depth <= 0) return 0;
+
+    Bitboard moves = generate_moves(red_bb|yellow_bb);
+
+    if (!moves) return 0; // draw if no moves left
+
+    int value = -INT_MAX; // max player
+    Bitboard best_move = 0; // initialyze it to an empty move
+    
+    // will be updated incrementally afterwards
+    Hash current_hash = position_hash(red_bb, yellow_bb);
+
+    do
+    {
+        // isolate least significant set bit
+        Bitboard tentative_move_only = moves & -moves;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        Hash move_hash = current_hash ^ red_hashes[get_bb_square(tentative_move_only)];
+
+        Bitboard tentative_move = (tentative_move_only | red_bb); // set other bits from our current BB
+
+        // recurse, considering the move we made
+        /* CAUTION! -INT_MIN is UB! use -INT_MAX instead of INT_MIN! */
+        int tentative_value = alpha_beta_yellow(move_hash, tentative_move, yellow_bb, depth-1, -INT_MAX, INT_MAX);
+
+        if (tentative_value > value) // max player
+        {
+            value = tentative_value;
+            best_move = tentative_move_only;
+        }
+
+        std::cout << "For move\n";
+        display_bitboard(tentative_move_only);
+        std::cout << "at root level, score is " << tentative_value << "\n\n";
+
+    } while (moves != Empty_BB);
+    
+    return best_move;
+}
+
+
+Bitboard root_search_yellow(Bitboard red_bb, Bitboard yellow_bb, int depth)
+{
+    // invalid parameter
+    if (depth <= 0) return 0;
+
+    Bitboard moves = generate_moves(red_bb|yellow_bb);
+    
+    if (!moves) return 0; // draw if no moves left
+
+    int value = INT_MAX; // min player
+    Bitboard best_move = 0; // initialyze it to an empty move
+    
+    // will be updated incrementally afterwards
+    Hash current_hash = position_hash(red_bb, yellow_bb);
+    
+    do
+    {
+        // isolate least significant set bit
+        Bitboard tentative_move_only = moves & -moves;
+        moves ^= tentative_move_only; // clear the bit from to-do list
+
+        // calculate new hash
+        Hash move_hash = current_hash ^ yellow_hashes[get_bb_square(tentative_move_only)];
+
+        Bitboard tentative_move = (tentative_move_only | yellow_bb); // set other bits from our current BB
+
+        // recurse, considering the move we made
+        /* CAUTION! -INT_MIN is UB! use -INT_MAX instead of INT_MIN! */
+        int tentative_value = alpha_beta_red(move_hash, red_bb, tentative_move, depth-1, -INT_MAX, INT_MAX);
+
+        if (tentative_value < value) // min player
+        {
+            value = tentative_value;
+            best_move = tentative_move_only;
+        }
+    
+        /*
+        std::cout << "For move\n";
+        display_bitboard(tentative_move_only);
+        std::cout << "at root level, score is " << tentative_value << "\n\n";
+        */
+
+    } while (moves != 0);
+    
+    return best_move;
+}
